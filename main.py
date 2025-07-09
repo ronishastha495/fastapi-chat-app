@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 from jose import JWTError, jwt
@@ -6,11 +6,15 @@ from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
-from models import User as DBUser
+from models import User as DBUser, Message
 from database import SessionLocal, engine, Base
 
 from dotenv import load_dotenv
 import os
+
+from connection_manager import ConnectionManager #websocket connction
+
+manager = ConnectionManager()
 
 # Load .env
 load_dotenv()
@@ -151,3 +155,46 @@ async def read_users_me(current_user: DBUser = Depends(get_current_active_user))
 @app.get("/admin-only")
 def admin_data(current_user: DBUser = Depends(require_role("admin"))):
     return {"message": f"Welcome Admin {current_user.username}"}
+
+@app.websocket("/ws/{room_id}")
+async def websocket_endpoint(websocket: WebSocket, room_id: str, token: str, db: Session = Depends(get_db)):
+    await websocket.accept()
+    await websocket.send_text(f"Connected to room: {room_id}")
+    try:
+        # Decode JWT manually (since FastAPI dependencies don't work in WebSocket)
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            await websocket.close(code=1008)
+            return
+    except JWTError:
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect(room_id, websocket)
+
+    # OPTIONAL: Send last 10 messages to user on connect
+    recent_messages = db.query(Message).filter(Message.room_id == room_id).order_by(Message.timestamp.desc()).limit(10).all()
+    for msg in reversed(recent_messages):
+        await websocket.send_text(f"{msg.timestamp.strftime('%H:%M')} {msg.sender}: {msg.content}")
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+
+            # Save message to DB
+            new_message = Message(content=data, sender=username, room_id=room_id)
+            db.add(new_message)
+            db.commit()
+
+            # Broadcast to all users in the room
+            await manager.broadcast(room_id, f"{username}: {data}")
+    except WebSocketDisconnect:
+        manager.disconnect(room_id, websocket)
+
+@app.get("/chat-docs")
+def chat_docs():
+    return {
+        "info": "To use the chat, connect via WebSocket to /ws/{room_id}?token=YOUR_TOKEN",
+        "example": "ws://localhost:8000/ws/general?token=eyJhbGciOiJ..."
+    }
