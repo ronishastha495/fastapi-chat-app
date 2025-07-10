@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FastAPI Chat</title>
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    #messages { border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: scroll; }
+    #send-box { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>FastAPI Chat</h1>
+  
+  <input type="text" id="token" placeholder="Enter JWT Token" style="width: 400px;" />
+  <input type="text" id="room_id" placeholder="Room ID (e.g., 1)" />
+  <button onclick="connect()">Connect</button>
+
+  <div id="messages"></div>
+
+  <div id="send-box" style="display:none;">
+    <input type="text" id="messageInput" placeholder="Type a message" />
+    <button onclick="sendMessage()">Send</button>
+  </div>
+
+  <script>
+    let socket;
+
+    function connect() {
+      const token = document.getElementById("token").value;
+      const roomId = document.getElementById("room_id").value;
+
+      socket = new WebSocket(`ws://localhost:8000/ws/${roomId}?token=${token}`);
+
+      socket.onopen = () => {
+        document.getElementById("send-box").style.display = "block";
+        document.getElementById("messages").innerHTML += "<p><i>Connected</i></p>";
+      };
+
+      socket.onmessage = event => {
+        const msg = document.createElement("p");
+        msg.textContent = event.data;
+        document.getElementById("messages").appendChild(msg);
+      };
+
+      socket.onclose = () => {
+        document.getElementById("send-box").style.display = "none";
+        document.getElementById("messages").innerHTML += "<p><i>Disconnected</i></p>";
+      };
+    }
+
+    function sendMessage() {
+      const message = document.getElementById("messageInput").value;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(message);
+        document.getElementById("messageInput").value = "";
+      }
+    }
+  </script>
+</body>
+</html>

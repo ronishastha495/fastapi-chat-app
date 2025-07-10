@@ -1,3 +1,5 @@
+# ✅ main.py — Complete code with authentication, WebSocket, and API router setup
+
 from fastapi import Depends, FastAPI, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
@@ -6,29 +8,31 @@ from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
-from models import User as DBUser, Message
-from database import SessionLocal, engine, Base
+from chat.models import User as DBUser, Message, Room
+from chat.database import SessionLocal, engine, Base, get_session
+from chat.connection_manager import ConnectionManager
+from chat.routes import room as room_router, message as message_router
 
 from dotenv import load_dotenv
 import os
 
-from connection_manager import ConnectionManager #websocket connction
-
-manager = ConnectionManager()
-
-# Load .env
+# Load secret key and DB URL from .env
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
+# Initialize DB
 Base.metadata.create_all(bind=engine)
 
+# App and utilities
 app = FastAPI()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+manager = ConnectionManager()
 
-# DB Dependency
+# Dependency for DB session
+
 def get_db():
     db = SessionLocal()
     try:
@@ -36,7 +40,7 @@ def get_db():
     finally:
         db.close()
 
-# Pydantic Schemas
+# === Pydantic Schemas ===
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -62,7 +66,7 @@ class UserCreate(BaseModel):
     password: str
     role: str = "user"
 
-# Utility Functions
+# === Utility Functions ===
 def get_password_hash(password):
     return pwd_context.hash(password)
 
@@ -84,7 +88,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-# Authentication Dependencies
+# === Authentication Dependencies ===
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -99,7 +103,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         token_data = TokenData(username=username, role=role)
     except JWTError:
         raise credentials_exception
-    
+
     user = get_user_from_db(db, username=token_data.username)
     if user is None:
         raise credentials_exception
@@ -117,7 +121,7 @@ def require_role(required_role: str):
         return current_user
     return role_checker
 
-# Routes
+# === Authentication Routes ===
 @app.post("/signup")
 def signup(user: UserCreate, db: Session = Depends(get_db)):
     db_user = get_user_from_db(db, user.username)
@@ -137,12 +141,12 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return {"message": "User created successfully"}
 
-@app.post("/token", response_model=Token)
+@app.post("/login", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
-    
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     token_data = {"sub": user.username, "role": user.role}
     access_token = create_access_token(data=token_data, expires_delta=access_token_expires)
@@ -156,38 +160,40 @@ async def read_users_me(current_user: DBUser = Depends(get_current_active_user))
 def admin_data(current_user: DBUser = Depends(require_role("admin"))):
     return {"message": f"Welcome Admin {current_user.username}"}
 
+# === WebSocket Chat ===
 @app.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str, token: str, db: Session = Depends(get_db)):
     await websocket.accept()
-    await websocket.send_text(f"Connected to room: {room_id}")
     try:
-        # Decode JWT manually (since FastAPI dependencies don't work in WebSocket)
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
-        if username is None:
+        if not username:
             await websocket.close(code=1008)
             return
     except JWTError:
         await websocket.close(code=1008)
         return
 
+    user = get_user_from_db(db, username)
+    if not user:
+        await websocket.close(code=1008)
+        return
+
     await manager.connect(room_id, websocket)
 
-    # OPTIONAL: Send last 10 messages to user on connect
-    recent_messages = db.query(Message).filter(Message.room_id == room_id).order_by(Message.timestamp.desc()).limit(10).all()
-    for msg in reversed(recent_messages):
+    # Send last 10 messages
+    recent = db.query(Message).filter(Message.room_id == room_id).order_by(Message.timestamp.desc()).limit(10).all()
+    for msg in reversed(recent):
         await websocket.send_text(f"{msg.timestamp.strftime('%H:%M')} {msg.sender}: {msg.content}")
 
     try:
         while True:
             data = await websocket.receive_text()
 
-            # Save message to DB
-            new_message = Message(content=data, sender=username, room_id=room_id)
-            db.add(new_message)
+            new_msg = Message(content=data, sender=username, room_id=room_id, user_id=user.id)
+            db.add(new_msg)
             db.commit()
 
-            # Broadcast to all users in the room
             await manager.broadcast(room_id, f"{username}: {data}")
     except WebSocketDisconnect:
         manager.disconnect(room_id, websocket)
@@ -198,3 +204,8 @@ def chat_docs():
         "info": "To use the chat, connect via WebSocket to /ws/{room_id}?token=YOUR_TOKEN",
         "example": "ws://localhost:8000/ws/general?token=eyJhbGciOiJ..."
     }
+
+# === Include all routers ===
+# app.include_router(user_router.router)
+app.include_router(room_router.router)
+app.include_router(message_router.router)

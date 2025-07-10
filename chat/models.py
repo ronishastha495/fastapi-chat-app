@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
-from database import Base
+from chat.database import Base
+from sqlalchemy.orm import relationship
 from datetime import datetime
 
 class User(Base):
@@ -12,6 +13,16 @@ class User(Base):
     disabled = Column(Boolean, default=False)
     role = Column(String, default="user")  # "user" or "admin"
 
+    messages = relationship("Message", back_populates="user")
+
+class Room(Base):
+    __tablename__ = "rooms"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, nullable=False)
+    description = Column(String)
+
+    messages = relationship("Message", back_populates="room")
+    
 class Message(Base):
     __tablename__ = "messages"
     
@@ -19,4 +30,9 @@ class Message(Base):
     content = Column(String, nullable=False)
     sender = Column(String, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
-    room_id = Column(String, index=True)
+
+    room_id = Column(Integer, ForeignKey("rooms.id"))
+    user_id = Column(Integer, ForeignKey("users.id"))
+
+    room = relationship("Room", back_populates="messages")
+    user = relationship("User", back_populates="messages")
